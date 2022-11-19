@@ -1,6 +1,6 @@
 use super::error::JsonError;
 
-use super::stream::ObjectStream as TObjectStream;
+use super::stream::TObjectStream;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -9,8 +9,16 @@ use tungstenite::protocol::Message;
 
 use super::error::Result;
 
-struct ObjectStream {
+pub struct ObjectStream {
     conn: WebSocketStream<TcpStream>,
+}
+
+impl ObjectStream {
+    pub async fn new(stream: TcpStream) -> Result<Self> {
+        let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+        let obj_stream = Self { conn: ws_stream };
+        Ok(obj_stream)
+    }
 }
 
 #[async_trait]

@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::error::JsonError;
 use super::error::Result;
-use super::stream::ObjectStream;
+use super::stream::TObjectStream;
 use async_trait::async_trait;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::Deserialize;
@@ -35,18 +35,19 @@ pub trait JsonRpc2 {
     // Call issues a standard request (http://www.jsonrpc.org/specification#request_object).
     async fn call(&self, method: String, params: Option<String>) -> Result<Option<Response>>;
     // Notify issues a notification request (http://www.jsonrpc.org/specification#notification).
-    async fn notify<T>(&self, method: String, params: Option<T>) -> Result<()>;
+    async fn notify(&self, method: String, params: Option<String>) -> Result<()>;
     // Close closes the underlying connection, if it exists.
-    async fn close(&mut self) -> Result<()>;
+    async fn close(&self) -> Result<()>;
+    async fn response(&self, response: Response) -> Result<()>;
 }
 
 pub trait Handler {
-    fn handle(&self, conn: Arc<Mutex<Conn>>, request: Request);
+    fn handle(&self, conn: &Conn, request: Request);
 }
 
 pub struct Conn {
-    stream: Arc<Mutex<dyn ObjectStream<String> + Send + Sync>>,
-    handler: Arc<dyn Handler + Send + Sync>,
+    stream: Arc<Mutex<dyn TObjectStream<String> + Send + Sync>>,
+    handler: Arc<Mutex<dyn Handler + Send + Sync>>,
     closed: AtomicBool,
     seq: AtomicU64,
     response_senders: Arc<Mutex<HashMap<Id, ResponseSender>>>,
@@ -54,16 +55,24 @@ pub struct Conn {
 
 impl Conn {
     fn new(
-        stream: Arc<Mutex<dyn ObjectStream<String> + Send + Sync>>,
-        h: Arc<dyn Handler + Send + Sync>,
+        stream: Arc<Mutex<dyn TObjectStream<String> + Send + Sync>>,
+        h: Arc<Mutex<dyn Handler + Send + Sync>>,
     ) -> Self {
-        Self {
+        let conn = Conn {
             stream: stream,
             handler: h,
             closed: AtomicBool::new(false),
             seq: AtomicU64::new(0),
             response_senders: Arc::new(Mutex::new(HashMap::new())),
-        }
+        };
+
+        // let arc_conn = Arc::new(Mutex::new(conn));
+
+        // tokio::spawn(async move {
+        //     conn.read_messages().await;
+        // });
+
+        conn
     }
 
     async fn send(&self, msg: AnyMessage) -> Result<()> {
@@ -76,17 +85,16 @@ impl Conn {
 
         Ok(())
     }
-    async fn read_messages(slf: Arc<Mutex<Self>>) {
-        let s = slf.lock().await;
+    pub async fn read_messages(&self) {
         loop {
-            if let Ok(msg) = s.stream.lock().await.read_object().await {
+            if let Ok(msg) = self.stream.lock().await.read_object().await {
                 if let Ok(any_message) = serde_json::from_str::<AnyMessage>(&msg) {
                     match any_message {
                         AnyMessage::Request(req) => {
-                            s.handler.handle(slf.clone(), req);
+                            self.handler.lock().await.handle(self, req);
                         }
                         AnyMessage::Response(res) => {
-                            match s.response_senders.lock().await.get_mut(&res.id) {
+                            match self.response_senders.lock().await.get_mut(&res.id) {
                                 Some(sender) => {
                                     if let Err(err) = sender.send(res) {
                                         log::error!("send response err: {}", err);
@@ -109,16 +117,15 @@ impl Conn {
 
 #[async_trait]
 impl JsonRpc2 for Conn {
-    async fn close(&mut self) -> Result<()> {
+    async fn close(&self) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(JsonError::ErrClosed);
         }
-
         self.closed.store(true, Ordering::Relaxed);
         self.stream.lock().await.close().await
     }
 
-    async fn notify<T>(&self, method: String, params: Option<T>) -> Result<()> {
+    async fn notify(&self, method: String, params: Option<String>) -> Result<()> {
         let msg = AnyMessage::Request(Request::new(method, params, None));
         self.send(msg).await?;
 
@@ -135,15 +142,23 @@ impl JsonRpc2 for Conn {
             .await
             .insert(id.clone(), sender);
 
-        let msg = AnyMessage::Request(Request::new(method, params, Some(id)));
+        let msg = AnyMessage::Request(Request::new(method, params, Some(id.clone())));
         self.send(msg).await?;
 
         //wait for the response
         if let Some(response) = receiver.recv().await {
+            self.response_senders.lock().await.remove(&id);
             return Ok(Some(response));
         }
 
         Ok(None)
+    }
+
+    async fn response(&self, response: Response) -> Result<()> {
+        let msg = AnyMessage::Response(response);
+        self.send(msg).await?;
+
+        Ok(())
     }
 }
 
@@ -213,5 +228,49 @@ mod tests {
             "marshal response: {}",
             serde_json::to_string(&response).unwrap()
         );
+    }
+
+    use super::Conn;
+    use super::Handler;
+    use crate::stream_ws::ObjectStream;
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
+
+    struct Processor {}
+
+    impl Handler for Processor {
+        fn handle(&self, conn: &Conn, request: Request) {
+            //conn.
+        }
+    }
+
+    #[tokio::test]
+
+    async fn test_client_server() {
+        let hander = Processor {};
+
+        let addr = "127.0.0.1:9002";
+        let listener = TcpListener::bind(&addr).await.expect("Can't listen");
+        log::info!("Listening on: {}", addr);
+
+        if let Ok((stream, _)) = listener.accept().await {
+            let obj_stream = ObjectStream::new(stream)
+                .await
+                .expect("cannot generate object stream");
+
+            let conn = Conn::new(
+                Arc::new(Mutex::new(obj_stream)),
+                Arc::new(Mutex::new(hander)),
+            );
+
+            tokio::spawn(async move {
+                conn.read_messages().await;
+            });
+
+            //let arc_conn = Arc::new(Mutex::new(conn));
+        }
+
+        //let conn = Conn::new(stream, h)
     }
 }

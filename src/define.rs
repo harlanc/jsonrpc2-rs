@@ -18,7 +18,6 @@ pub struct Request {
     #[serde(rename = "id", skip_serializing_if = "Option::is_none")]
     id: Option<Id>,
 }
-
 impl Request {
     pub fn new(method: String, params: Option<String>, id: Option<Id>) -> Self {
         Self {
@@ -29,7 +28,6 @@ impl Request {
         }
     }
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
     #[serde(rename = "jsonrpc2")]
@@ -41,7 +39,6 @@ pub struct Response {
     #[serde(rename = "error", skip_serializing_if = "Option::is_none")]
     error: Option<Error>,
 }
-
 impl Response {
     pub fn new(id: Id, result: Option<String>, error: Option<Error>) -> Self {
         Self {
