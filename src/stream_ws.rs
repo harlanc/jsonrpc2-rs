@@ -36,6 +36,7 @@ impl TObjectStream<String> for ObjectStream {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.conn.close(None).await?;
         Ok(())
     }
 }
