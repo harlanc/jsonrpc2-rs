@@ -42,6 +42,9 @@ pub enum JsonError {
 
     #[error("can't marshal *jsonrpc2.Response (must have result or error)")]
     ErrCanNotMarshalResponse,
+
+    #[error("No response generated after the call function")]
+    ErrNoResponseGenerated,
 }
 // impl Error {
 //     pub fn equal(&self, err: &anyhow::Error) -> bool {

@@ -26,19 +26,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
-// JSONRPC2 describes an interface for issuing requests that speak the
-// JSON-RPC 2 protocol.  It isn't really necessary for this package
-// itself, but is useful for external users that use the interface as
-// an API boundary.
+
 #[async_trait]
 pub trait JsonRpc2 {
-    // Call issues a standard request (http://www.jsonrpc.org/specification#request_object).
-    async fn call(&self, method: String, params: Option<String>) -> Result<Option<Response>>;
-    // Notify issues a notification request (http://www.jsonrpc.org/specification#notification).
+    //http://www.jsonrpc.org/specification#request_object
+    async fn call(&self, method: &str, params: Option<&str>) -> Result<Response>;
+    //http://www.jsonrpc.org/specification#notification
     async fn notify(&self, method: String, params: Option<String>) -> Result<()>;
-    // Close closes the underlying connection, if it exists.
-    async fn close(&self) -> Result<()>;
+    //https://www.jsonrpc.org/specification#response_object
     async fn response(&self, response: Response) -> Result<()>;
+    async fn close(&self) -> Result<()>;
 }
 
 pub trait Handler {
@@ -132,7 +129,7 @@ impl JsonRpc2 for Conn {
         Ok(())
     }
 
-    async fn call(&self, method: String, params: Option<String>) -> Result<Option<Response>> {
+    async fn call(&self, method: &str, params: Option<&str>) -> Result<Response> {
         let (sender, mut receiver) = mpsc::unbounded_channel();
 
         let id_num = self.seq.fetch_add(1, Ordering::Relaxed);
@@ -142,16 +139,25 @@ impl JsonRpc2 for Conn {
             .await
             .insert(id.clone(), sender);
 
-        let msg = AnyMessage::Request(Request::new(method, params, Some(id.clone())));
+        let params_string = match params {
+            Some(s) => Some(String::from(s)),
+            None => None,
+        };
+
+        let msg = AnyMessage::Request(Request::new(
+            String::from(method),
+            params_string,
+            Some(id.clone()),
+        ));
         self.send(msg).await?;
 
         //wait for the response
         if let Some(response) = receiver.recv().await {
             self.response_senders.lock().await.remove(&id);
-            return Ok(Some(response));
+            return Ok(response);
         }
 
-        Ok(None)
+        Err(JsonError::ErrNoResponseGenerated)
     }
 
     async fn response(&self, response: Response) -> Result<()> {
@@ -167,6 +173,7 @@ mod tests {
 
     use super::AnyMessage;
     use super::Id;
+    use super::JsonRpc2;
     use super::Request;
     use super::Response;
     use std::str::FromStr;
@@ -245,9 +252,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-
-    async fn test_client_server() {
+    async fn init_server() {
         let hander = Processor {};
 
         let addr = "127.0.0.1:9002";
@@ -255,20 +260,45 @@ mod tests {
         log::info!("Listening on: {}", addr);
 
         if let Ok((stream, _)) = listener.accept().await {
-            let obj_stream = ObjectStream::new(stream)
+            let server_stream = ObjectStream::new(stream)
                 .await
                 .expect("cannot generate object stream");
 
             let conn = Conn::new(
-                Arc::new(Mutex::new(obj_stream)),
+                Arc::new(Mutex::new(server_stream)),
                 Arc::new(Mutex::new(hander)),
             );
 
             tokio::spawn(async move {
                 conn.read_messages().await;
             });
+        }
+    }
 
-            //let arc_conn = Arc::new(Mutex::new(conn));
+    #[tokio::test]
+
+    async fn test_client_server() {
+        tokio::spawn(async move {
+            init_server().await;
+        });
+        if let Ok(stream) = TcpStream::connect("127.0.0.1:9002").await {
+            let client_stream = ObjectStream::new(stream)
+                .await
+                .expect("cannot generate object stream");
+
+            let hander = Processor {};
+
+            let conn = Conn::new(
+                Arc::new(Mutex::new(client_stream)),
+                Arc::new(Mutex::new(hander)),
+            );
+
+            match conn.call("add", Some("[2,3]")).await {
+                Ok(response) => {}
+                Err(err) => {
+                    log::error!("call add error: {}", err);
+                }
+            }
         }
 
         //let conn = Conn::new(stream, h)
