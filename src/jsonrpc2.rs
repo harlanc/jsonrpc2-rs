@@ -38,19 +38,20 @@ pub trait JsonRpc2 {
     async fn close(&self) -> Result<()>;
 }
 
-pub trait Handler {
-    fn handle(&self, conn: &Conn, request: Request);
+#[async_trait]
+pub trait Handler<T> {
+    async fn handle(&self, conn: &Conn, request: Request<T>);
 }
 
-pub struct Conn {
+pub struct Conn<T> {
     stream: Arc<Mutex<dyn TObjectStream<String> + Send + Sync>>,
-    handler: Arc<Mutex<dyn Handler + Send + Sync>>,
+    handler: Arc<Mutex<dyn Handler<T> + Send + Sync>>,
     closed: AtomicBool,
     seq: AtomicU64,
     response_senders: Arc<Mutex<HashMap<Id, ResponseSender>>>,
 }
 
-impl Conn {
+impl<T> Conn {
     fn new(
         stream: Arc<Mutex<dyn TObjectStream<String> + Send + Sync>>,
         h: Arc<Mutex<dyn Handler + Send + Sync>>,
@@ -88,7 +89,7 @@ impl Conn {
                 if let Ok(any_message) = serde_json::from_str::<AnyMessage>(&msg) {
                     match any_message {
                         AnyMessage::Request(req) => {
-                            self.handler.lock().await.handle(self, req);
+                            self.handler.lock().await.handle(self, req).await;
                         }
                         AnyMessage::Response(res) => {
                             match self.response_senders.lock().await.get_mut(&res.id) {
@@ -195,6 +196,23 @@ mod tests {
         let req2 = serde_json::from_str(&serialized).unwrap();
         assert_eq!(request, req2);
     }
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct Test {
+        params: Vec<u32>,
+    }
+
+    #[test]
+    fn test_array() {
+        let mut v = Vec::new();
+        v.push(1);
+        v.push(2);
+
+        let test = Test { params: v };
+
+        let data = serde_json::to_string(&test).unwrap();
+
+        println!("data:{}",data);
+    }
     #[test]
     fn test_any_message() {
         let method = String::from_str("add").unwrap();
@@ -239,16 +257,41 @@ mod tests {
 
     use super::Conn;
     use super::Handler;
-    use crate::stream_ws::ObjectStream;
+    use crate::stream_ws::ClientObjectStream;
+    use crate::stream_ws::ServerObjectStream;
+    use async_trait::async_trait;
+    use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::signal;
     use tokio::sync::Mutex;
+    use tokio::time;
 
     struct Processor {}
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct AddParameter {
+        params: Vec<u32>,
+    }
+    #[async_trait]
     impl Handler for Processor {
-        fn handle(&self, conn: &Conn, request: Request) {
-            //conn.
+        async fn handle(&self, conn: &Conn, request: Request) {
+            match request.method.as_str() {
+                "add" => {
+                    println!("params:{}", &request.params.clone().unwrap());
+                    let params =
+                        serde_json::from_str::<AddParameter>(&request.params.unwrap()).unwrap();
+                    let add_res: u32 = params.params.iter().sum();
+
+                    let response =
+                        Response::new(request.id.unwrap(), Some(add_res.to_string()), None);
+                    conn.response(response).await.unwrap();
+                }
+
+                _ => {
+                    log::info!("unknow method");
+                }
+            }
         }
     }
 
@@ -258,48 +301,100 @@ mod tests {
         let addr = "127.0.0.1:9002";
         let listener = TcpListener::bind(&addr).await.expect("Can't listen");
         log::info!("Listening on: {}", addr);
+        println!("listening on:{}", addr);
 
         if let Ok((stream, _)) = listener.accept().await {
-            let server_stream = ObjectStream::new(stream)
+            println!("listening on 1:{}", addr);
+            let server_stream = ServerObjectStream::accept(stream)
                 .await
                 .expect("cannot generate object stream");
-
+            println!("listening on 1.1:{}", addr);
             let conn = Conn::new(
                 Arc::new(Mutex::new(server_stream)),
                 Arc::new(Mutex::new(hander)),
             );
-
+            println!("listening on 2:{}", addr);
             tokio::spawn(async move {
                 conn.read_messages().await;
             });
+            println!("listening on 3:{}", addr);
+        } else {
+            println!("listening on 4:{}", addr);
+            log::error!("cannot init a tcpstream!!");
         }
+        println!("init server finished");
     }
 
     #[tokio::test]
-
     async fn test_client_server() {
         tokio::spawn(async move {
             init_server().await;
+            signal::ctrl_c().await;
         });
-        if let Ok(stream) = TcpStream::connect("127.0.0.1:9002").await {
-            let client_stream = ObjectStream::new(stream)
-                .await
-                .expect("cannot generate object stream");
 
-            let hander = Processor {};
+        println!("test_client_server 1");
 
-            let conn = Conn::new(
-                Arc::new(Mutex::new(client_stream)),
-                Arc::new(Mutex::new(hander)),
-            );
+        time::sleep(time::Duration::new(2, 0)).await;
 
-            match conn.call("add", Some("[2,3]")).await {
-                Ok(response) => {}
-                Err(err) => {
-                    log::error!("call add error: {}", err);
-                }
+        let url = url::Url::parse("ws://127.0.0.1:9002/").unwrap();
+
+        let client_stream = ClientObjectStream::connect(url)
+            .await
+            .expect("cannot generate object stream");
+
+        let hander = Processor {};
+
+        let conn = Conn::new(
+            Arc::new(Mutex::new(client_stream)),
+            Arc::new(Mutex::new(hander)),
+        );
+
+        match conn.call("add", Some("[2,3]")).await {
+            Ok(response) => {
+                let result = response.result.unwrap();
+                print!("result: {}", result);
+            }
+            Err(err) => {
+                log::error!("call add error: {}", err);
             }
         }
+
+        // println!("test_client_server 2");
+        // match TcpStream::connect("127.0.0.1:9002").await {
+        //     Ok(stream) => {
+        //         println!("test_client_server 3");
+
+        //         // let tcp = TcpStream::connect("127.0.0.1:12345")
+        //         //     .await
+        //         //     .expect("Failed to connect");
+        //         let url = url::Url::parse("ws://127.0.0.1:9002/").unwrap();
+
+        //         let client_stream = ClientObjectStream::connect(url)
+        //             .await
+        //             .expect("cannot generate object stream");
+
+        //         let hander = Processor {};
+
+        //         let conn = Conn::new(
+        //             Arc::new(Mutex::new(client_stream)),
+        //             Arc::new(Mutex::new(hander)),
+        //         );
+
+        //         match conn.call("add", Some("[2,3]")).await {
+        //             Ok(response) => {
+        //                 let result = response.result.unwrap();
+        //                 print!("result: {}", result);
+        //             }
+        //             Err(err) => {
+        //                 log::error!("call add error: {}", err);
+        //             }
+        //         }
+        //     }
+        //     Err(err) => {
+        //         println!("err:{}", err);
+        //         log::error!("cannot connect server!");
+        //     }
+        // }
 
         //let conn = Conn::new(stream, h)
     }

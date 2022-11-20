@@ -28,6 +28,7 @@ tokio = { version = "1.4.0", default-features = false, features = ["full"] }
 thiserror = "1.0.25"
 beef = { version = "0.5.1", features = ["impl_serde"] }
 log = "0.4"
+url = "2.0.0"
 [dependencies.tungstenite]
 version = "0.17.3"
 default-features = false

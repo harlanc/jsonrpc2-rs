@@ -6,20 +6,20 @@ pub(super) type ResponseSender = mpsc::UnboundedSender<Response>;
 pub(super) type ResponseReceiver = mpsc::UnboundedReceiver<Response>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct Request {
+pub struct Request<T> {
     #[serde(rename = "jsonrpc2")]
     jsonrpc2: String,
     #[serde(rename = "method")]
-    method: String,
+    pub method: String,
     #[serde(rename = "params", skip_serializing_if = "Option::is_none")]
-    params: Option<String>,
+    pub params: Option<T>,
     //if id is none , then it is a notification
     //https://www.jsonrpc.org/specification#notification
     #[serde(rename = "id", skip_serializing_if = "Option::is_none")]
-    id: Option<Id>,
+    pub id: Option<Id>,
 }
-impl Request {
-    pub fn new(method: String, params: Option<String>, id: Option<Id>) -> Self {
+impl<T> Request<T> {
+    pub fn new(method: String, params: Option<T>, id: Option<Id>) -> Self {
         Self {
             jsonrpc2: "2.0".to_string(),
             method,
@@ -35,7 +35,7 @@ pub struct Response {
     #[serde(rename = "id")]
     pub id: Id,
     #[serde(rename = "result", skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
+    pub result: Option<String>,
     #[serde(rename = "error", skip_serializing_if = "Option::is_none")]
     error: Option<Error>,
 }
@@ -70,7 +70,7 @@ pub enum Id {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-pub(super) enum AnyMessage {
-    Request(Request),
+pub(super) enum AnyMessage<T> {
+    Request(Request<T>),
     Response(Response),
 }
