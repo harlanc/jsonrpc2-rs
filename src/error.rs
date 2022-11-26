@@ -42,6 +42,9 @@ pub enum JsonError {
 
     #[error("No response generated after the call function")]
     ErrNoResponseGenerated,
+
+    #[error("Channle send error")]
+    ErrChannelSendError,
 }
 
 impl From<WsError> for JsonError {

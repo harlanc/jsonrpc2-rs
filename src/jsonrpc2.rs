@@ -19,31 +19,128 @@ use {
 };
 
 #[async_trait]
-pub trait JsonRpc2<S, R, E> {
+pub trait TJsonRpc2<S, R, E> {
     //http://www.jsonrpc.org/specification#request_object C->S
     async fn call(&self, method: &str, params: Option<S>) -> Result<Response<R, E>>;
     //http://www.jsonrpc.org/specification#notification C->S
-    async fn notify(&self, method: String, params: Option<S>) -> Result<()>;
+    fn notify(&self, method: String, params: Option<S>) -> Result<()>;
     //https://www.jsonrpc.org/specification#response_object S->C
-    async fn response(&self, response: Response<R, E>) -> Result<()>;
+    fn response(&self, response: Response<R, E>) -> Result<()>;
 }
 
 #[async_trait]
-pub trait Handler<S, R, E>
+pub trait THandler<S, R, E>
 where
     S: Serialize,
 {
-    async fn handle(&self, conn: &Conn<S, R, E>, request: Request<S>);
+    async fn handle(&self, conn: &mut Conn<S, R, E>, request: Request<S>);
+}
+
+pub struct JsonRpc2<S, R, E> {
+    // stream: Box<dyn TObjectStream<String> + Send + Sync>,
+    // //handler is used for receiving the Request message
+    // //and implementing the customized logic
+    // handler: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+    // closed: AtomicBool,
+    seq: AtomicU64,
+    response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
+    any_message_sender: AnyMessageSender<S, R, E>,
+}
+
+impl<S, R, E> JsonRpc2<S, R, E>
+where
+    S: Serialize + DeserializeOwned,
+    R: Serialize + DeserializeOwned,
+    E: Serialize + DeserializeOwned,
+{
+    async fn new(
+        stream: Box<dyn TObjectStream<String> + Send + Sync>,
+        h: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+    ) -> Self
+    where
+        S: Send + Sync + 'static,
+        R: Send + Sync + 'static,
+        E: Send + Sync + 'static,
+    {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut conn = Conn::new(stream, h, sender.clone());
+
+        let response_notifiers = Arc::new(Mutex::new(HashMap::new()));
+        let response_notifiers_clone = response_notifiers.clone();
+
+        tokio::spawn(async move {
+            conn.run_loop(receiver, response_notifiers).await;
+        });
+
+        Self {
+            seq: AtomicU64::new(0),
+            response_notifiers: response_notifiers_clone,
+            any_message_sender: sender,
+        }
+    }
+}
+
+#[async_trait]
+impl<S, R, E> TJsonRpc2<S, R, E> for JsonRpc2<S, R, E>
+where
+    S: Serialize + DeserializeOwned + Sync + Send,
+    R: Serialize + DeserializeOwned + Sync + Send,
+    E: Serialize + DeserializeOwned + Sync + Send,
+{
+    fn notify(&self, method: String, params: Option<S>) -> Result<()> {
+        let msg = AnyMessage::Request(Request::new(method, params, None));
+
+        if let Err(_) = self.any_message_sender.send(msg) {
+            return Err(JsonError::ErrChannelSendError);
+        }
+
+        Ok(())
+    }
+
+    async fn call(&self, method: &str, params: Option<S>) -> Result<Response<R, E>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+         println!("call 0");
+        let id_num = self.seq.fetch_add(1, Ordering::Relaxed);
+        let id = Id::Number(id_num);
+        self.response_notifiers
+            .lock()
+            .await
+            .insert(id.clone(), sender);
+            println!("call 1");
+        let msg = AnyMessage::Request(Request::new(String::from(method), params, Some(id.clone())));
+        if let Err(_) = self.any_message_sender.send(msg) {
+            return Err(JsonError::ErrChannelSendError);
+        }
+        println!("call 2");
+        //wait for the response
+        if let Some(response) = receiver.recv().await {
+            self.response_notifiers.lock().await.remove(&id);
+            return Ok(response);
+        }
+        println!("call 3");
+        Err(JsonError::ErrNoResponseGenerated)
+    }
+
+    fn response(&self, response: Response<R, E>) -> Result<()> {
+        let msg = AnyMessage::Response(response);
+
+        if let Err(_) = self.any_message_sender.send(msg) {
+            return Err(JsonError::ErrChannelSendError);
+        }
+        Ok(())
+    }
 }
 
 pub struct Conn<S, R, E> {
-    stream: Arc<Mutex<dyn TObjectStream<String> + Send + Sync>>,
+    stream: Box<dyn TObjectStream<String> + Send + Sync>,
     //handler is used for receiving the Request message
     //and implementing the customized logic
-    handler: Option<Arc<Mutex<dyn Handler<S, R, E> + Send + Sync>>>,
+    handler: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
     closed: AtomicBool,
-    seq: AtomicU64,
-    response_senders: Arc<Mutex<HashMap<Id, ResponseSender<R, E>>>>,
+    // seq: AtomicU64,
+    // response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
+    any_message_sender: AnyMessageSender<S, R, E>,
+    // any_message_receiver: AnyMessageReceiver<S, R, E>,
 }
 
 impl<S, R, E> Conn<S, R, E>
@@ -54,60 +151,120 @@ where
 {
     #[allow(dead_code)]
 
-    async fn new(
-        stream: Arc<Mutex<dyn TObjectStream<String> + Send + Sync>>,
-        h: Option<Arc<Mutex<dyn Handler<S, R, E> + Send + Sync>>>,
-    ) -> Arc<Self>
+    fn new(
+        stream: Box<dyn TObjectStream<String> + Send + Sync>,
+        h: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+        any_message_sender: AnyMessageSender<S, R, E>,
+    ) -> Self
     where
         S: Send + Sync + 'static,
         R: Send + Sync + 'static,
         E: Send + Sync + 'static,
     {
-        let conn = Conn {
+        // let (sender, receiver) = mpsc::unbounded_channel();
+        let mut conn = Conn {
             stream: stream,
             handler: h,
             closed: AtomicBool::new(false),
-            seq: AtomicU64::new(0),
-            response_senders: Arc::new(Mutex::new(HashMap::new())),
+            any_message_sender, // seq: AtomicU64::new(0),
+                                // response_notifiers: Arc::new(Mutex::new(HashMap::new())),
+                                // any_message_sender: sender,
+                                // any_message_receiver: receiver,
         };
 
-        let arc_conn = Arc::new(conn);
+        // let arc_conn = Arc::new(Mutex::new(conn));
 
-        let arc_conn_clone = arc_conn.clone();
-        tokio::spawn(async move {
-            arc_conn_clone.read_loop().await;
-        });
+        // let arc_conn_clone = arc_conn.clone();
 
-        arc_conn
+        conn
     }
 
-    async fn send(&self, msg: AnyMessage<S, R, E>) -> Result<()> {
+    async fn send(&mut self, msg: AnyMessage<S, R, E>) -> Result<()> {
+        println!("send 1");
         if self.closed.load(Ordering::Relaxed) {
             return Err(JsonError::ErrClosed);
         }
-
+        println!("send 2");
         let send_msg = serde_json::to_string(&msg)?;
-        self.stream.lock().await.write_object(send_msg).await?;
+        self.stream.write_object(send_msg).await?;
+        println!("send 3");
         Ok(())
     }
-    pub async fn read_loop(&self) {
+    pub async fn run_loop(
+        &mut self,
+        mut any_msg_receiver: AnyMessageReceiver<S, R, E>,
+        response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
+    ) {
+        // let (sender, mut receiver) = mpsc::unbounded_channel();
+
+        // loop {
+        //     tokio::select! {
+        //          msg = receiver.recv() =>{}//self.stream.lock().await.read_object() =>{printfln("sadfa");}
+        //          _ =>{}
+
+        //     }
+
+        let cur_msg: String;
+
+        // if let Ok(msg) = self.stream.lock().await.read_object().await.i {
+        //     cur_msg = msg;
+        // } else {
+        //     continue;
+        // }
+
+        // let stream = &mut self.stream;
+
         loop {
-            let cur_msg: String;
-            if let Ok(msg) = self.stream.lock().await.read_object().await {
-                cur_msg = msg;
-            } else {
+            let mut msg_data: Option<String> = None;
+            tokio::select! {
+                    msg = self.stream.read_object() => {
+
+                    match msg{
+                        Ok(data) =>{
+
+                            msg_data = Some(data);
+
+                    }
+                        Err(err) =>{
+                            continue;
+                        }
+
+                    }
+
+
+            }
+
+
+                   any_message= any_msg_receiver.recv() =>{
+
+                    println!("get message=======0");
+
+                    if let Some(any_message_data) = any_message{
+                        println!("get message=======1");
+                        self.send(any_message_data).await;
+                        println!("get message=======2");
+
+                    }
+
+
+                }
+
+                    }
+
+            if msg_data.is_none() {
                 continue;
             }
 
-            if let Ok(any_message) = serde_json::from_str::<AnyMessage<S, R, E>>(&cur_msg) {
+            if let Ok(any_message) = serde_json::from_str::<AnyMessage<S, R, E>>(&msg_data.unwrap())
+            {
                 match any_message {
                     AnyMessage::Request(req) => {
-                        if let Some(handler) = &self.handler {
-                            handler.lock().await.handle(self, req).await;
+                        if let Some(handler) = self.handler.take() {
+                            handler.handle(self, req).await;
                         }
                     }
                     AnyMessage::Response(res) => {
-                        match self.response_senders.lock().await.get_mut(&res.id) {
+                        match response_notifiers.lock().await.get_mut(&res.id) {
                             Some(sender) => {
                                 if let Err(err) = sender.send(res) {
                                     log::error!("send response err: {}", err);
@@ -123,10 +280,45 @@ where
                     }
                 }
             }
+            // _ = interval.tick() => {
+            //     ws_sender.send(Message::Text("tick".to_owned())).await?;
+            // }
         }
+
+        // let cur_msg: String;
+        // if let Ok(msg) = self.stream.lock().await.read_object().await {
+        //     cur_msg = msg;
+        // } else {
+        //     continue;
+        // }
+
+        // if let Ok(any_message) = serde_json::from_str::<AnyMessage<S, R, E>>(&cur_msg) {
+        //     match any_message {
+        //         AnyMessage::Request(req) => {
+        //             if let Some(handler) = &self.handler {
+        //                 handler.lock().await.handle(self, req).await;
+        //             }
+        //         }
+        //         AnyMessage::Response(res) => {
+        //             match self.response_senders.lock().await.get_mut(&res.id) {
+        //                 Some(sender) => {
+        //                     if let Err(err) = sender.send(res) {
+        //                         log::error!("send response err: {}", err);
+        //                     }
+        //                 }
+        //                 None => {
+        //                     log::error!(
+        //                         "the responsd sender with id: {} is none",
+        //                         serde_json::to_string(&res.id).unwrap()
+        //                     );
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
     }
     #[allow(dead_code)]
-    async fn close(&self) -> Result<()> {
+    async fn close(&mut self) -> Result<()> {
         println!("close=======0");
         if self.closed.load(Ordering::Relaxed) {
             return Err(JsonError::ErrClosed);
@@ -134,52 +326,69 @@ where
         println!("close=======1");
         self.closed.store(true, Ordering::Relaxed);
         println!("close=======2");
-        self.stream.lock().await.close().await
-    }
-}
-
-#[async_trait]
-impl<S, R, E> JsonRpc2<S, R, E> for Conn<S, R, E>
-where
-    S: Serialize + DeserializeOwned + Sync + Send,
-    R: Serialize + DeserializeOwned + Sync + Send,
-    E: Serialize + DeserializeOwned + Sync + Send,
-{
-    async fn notify(&self, method: String, params: Option<S>) -> Result<()> {
-        let msg = AnyMessage::Request(Request::new(method, params, None));
-        self.send(msg).await?;
-
-        Ok(())
+        self.stream.close().await
     }
 
-    async fn call(&self, method: &str, params: Option<S>) -> Result<Response<R, E>> {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-
-        let id_num = self.seq.fetch_add(1, Ordering::Relaxed);
-        let id = Id::Number(id_num);
-        self.response_senders
-            .lock()
-            .await
-            .insert(id.clone(), sender);
-
-        let msg = AnyMessage::Request(Request::new(String::from(method), params, Some(id.clone())));
-        self.send(msg).await?;
-
-        //wait for the response
-        if let Some(response) = receiver.recv().await {
-            self.response_senders.lock().await.remove(&id);
-            return Ok(response);
-        }
-
-        Err(JsonError::ErrNoResponseGenerated)
-    }
-
-    async fn response(&self, response: Response<R, E>) -> Result<()> {
+    fn response(&self, response: Response<R, E>) -> Result<()> {
         let msg = AnyMessage::Response(response);
-        self.send(msg).await?;
+
+        if let Err(_) = self.any_message_sender.send(msg) {
+            return Err(JsonError::ErrChannelSendError);
+        }
         Ok(())
     }
 }
+
+// #[async_trait]
+// impl<S, R, E> TJsonRpc2<S, R, E> for Conn<S, R, E>
+// where
+//     S: Serialize + DeserializeOwned + Sync + Send,
+//     R: Serialize + DeserializeOwned + Sync + Send,
+//     E: Serialize + DeserializeOwned + Sync + Send,
+// {
+//     fn notify(&self, method: String, params: Option<S>) -> Result<()> {
+//         let msg = AnyMessage::Request(Request::new(method, params, None));
+
+//         if let Err(_) = self.any_message_sender.send(msg) {
+//             return Err(JsonError::ErrChannelSendError);
+//         }
+
+//         Ok(())
+//     }
+
+//     async fn call(&self, method: &str, params: Option<S>) -> Result<Response<R, E>> {
+//         let (sender, mut receiver) = mpsc::unbounded_channel();
+
+//         let id_num = self.seq.fetch_add(1, Ordering::Relaxed);
+//         let id = Id::Number(id_num);
+//         self.response_notifiers
+//             .lock()
+//             .await
+//             .insert(id.clone(), sender);
+
+//         let msg = AnyMessage::Request(Request::new(String::from(method), params, Some(id.clone())));
+//         if let Err(_) = self.any_message_sender.send(msg) {
+//             return Err(JsonError::ErrChannelSendError);
+//         }
+
+//         //wait for the response
+//         if let Some(response) = receiver.recv().await {
+//             self.response_notifiers.lock().await.remove(&id);
+//             return Ok(response);
+//         }
+
+//         Err(JsonError::ErrNoResponseGenerated)
+//     }
+
+//     fn response(&self, response: Response<R, E>) -> Result<()> {
+//         let msg = AnyMessage::Response(response);
+
+//         if let Err(_) = self.any_message_sender.send(msg) {
+//             return Err(JsonError::ErrChannelSendError);
+//         }
+//         Ok(())
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -247,14 +456,14 @@ mod tests {
     struct Add {}
 
     #[async_trait]
-    impl Handler<Vec<u32>, u32, String> for Add {
-        async fn handle(&self, conn: &Conn<Vec<u32>, u32, String>, request: Request<Vec<u32>>) {
+    impl THandler<Vec<u32>, u32, String> for Add {
+        async fn handle(&self, conn: &mut Conn<Vec<u32>, u32, String>, request: Request<Vec<u32>>) {
             match request.method.as_str() {
                 "add" => {
                     let params = request.params.unwrap();
                     let add_res: u32 = params.iter().sum();
                     let response = Response::new(request.id.unwrap(), Some(add_res), None);
-                    conn.response(response).await.unwrap();
+                    conn.response(response).unwrap();
                 }
 
                 _ => {
@@ -273,11 +482,7 @@ mod tests {
                 .await
                 .expect("cannot generate object stream");
 
-            Conn::new(
-                Arc::new(Mutex::new(server_stream)),
-                Some(Arc::new(Mutex::new(Add {}))),
-            )
-            .await;
+            JsonRpc2::new(Box::new(server_stream), Some(Box::new(Add {}))).await;
         }
         println!("init server finished");
     }
@@ -295,23 +500,25 @@ mod tests {
             .await
             .expect("cannot generate object stream");
 
-        let conn_arc =
-            Arc::new(Conn::<_, u32, String>::new(Arc::new(Mutex::new(client_stream)), None).await);
+        let conn_arc = JsonRpc2::<_, u32, String>::new(Box::new(client_stream), None).await;
 
         time::sleep(time::Duration::new(2, 0)).await;
+        println!("adfadfadf");
         match conn_arc.call("add", Some(vec![2u32, 3u32, 4u32])).await {
             Ok(response) => {
                 let result = response.result.unwrap();
                 print!("result: {}", result);
                 assert_eq!(result, 9);
+                println!("adfadfadf===");
             }
             Err(err) => {
                 log::error!("call add error: {}", err);
+                println!("adfadfadf+++");
             }
         }
 
         println!("===============");
 
-        conn_arc.close().await.unwrap();
+        // conn_arc.close().await.unwrap();
     }
 }

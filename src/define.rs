@@ -4,7 +4,9 @@ use {
     tokio::sync::mpsc,
 };
 
-pub(super) type ResponseSender<R, E> = mpsc::UnboundedSender<Response<R, E>>;
+pub(super) type ResponseNotifier<R, E> = mpsc::UnboundedSender<Response<R, E>>;
+pub(super) type AnyMessageSender<S, R, E> = mpsc::UnboundedSender<AnyMessage<S, R, E>>;
+pub(super) type AnyMessageReceiver<S, R, E> = mpsc::UnboundedReceiver<AnyMessage<S, R, E>>;
 
 //https://www.jsonrpc.org/specification#request_object
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -83,7 +85,7 @@ pub enum Id {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
-pub(super) enum AnyMessage<S, R, E> {
+pub enum AnyMessage<S, R, E> {
     Request(Request<S>),
     Response(Response<R, E>),
 }
