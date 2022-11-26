@@ -33,102 +33,14 @@ pub trait THandler<S, R, E>
 where
     S: Serialize,
 {
-    async fn handle(&self, conn: &mut Conn<S, R, E>, request: Request<S>);
-}
-
-pub struct JsonRpc2<S, R, E> {
-    seq: AtomicU64,
-    response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
-    any_message_sender: AnyMessageSender<S, R, E>,
-}
-
-impl<S, R, E> JsonRpc2<S, R, E>
-where
-    S: Serialize + DeserializeOwned,
-    R: Serialize + DeserializeOwned,
-    E: Serialize + DeserializeOwned,
-{
-    async fn new(
-        stream: Box<dyn TObjectStream<String> + Send + Sync>,
-        h: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
-    ) -> Self
-    where
-        S: Send + Sync + 'static,
-        R: Send + Sync + 'static,
-        E: Send + Sync + 'static,
-    {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let mut conn = Conn::new(stream, h, sender.clone());
-
-        let response_notifiers = Arc::new(Mutex::new(HashMap::new()));
-        let response_notifiers_clone = response_notifiers.clone();
-
-        tokio::spawn(async move {
-            conn.run_loop(receiver, response_notifiers).await;
-        });
-
-        Self {
-            seq: AtomicU64::new(0),
-            response_notifiers: response_notifiers_clone,
-            any_message_sender: sender,
-        }
-    }
-}
-
-#[async_trait]
-impl<S, R, E> TJsonRpc2<S, R, E> for JsonRpc2<S, R, E>
-where
-    S: Serialize + DeserializeOwned + Sync + Send,
-    R: Serialize + DeserializeOwned + Sync + Send,
-    E: Serialize + DeserializeOwned + Sync + Send,
-{
-    fn notify(&self, method: String, params: Option<S>) -> Result<()> {
-        let msg = AnyMessage::Request(Request::new(method, params, None));
-        if let Err(_) = self.any_message_sender.send(msg) {
-            return Err(JsonError::ErrChannelSendError);
-        }
-        Ok(())
-    }
-
-    async fn call(&self, method: &str, params: Option<S>) -> Result<Response<R, E>> {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        println!("call 0");
-        let id_num = self.seq.fetch_add(1, Ordering::Relaxed);
-        let id = Id::Number(id_num);
-        self.response_notifiers
-            .lock()
-            .await
-            .insert(id.clone(), sender);
-        println!("call 1");
-        let msg = AnyMessage::Request(Request::new(String::from(method), params, Some(id.clone())));
-        if let Err(_) = self.any_message_sender.send(msg) {
-            return Err(JsonError::ErrChannelSendError);
-        }
-        println!("call 2");
-        //wait for the response
-        if let Some(response) = receiver.recv().await {
-            self.response_notifiers.lock().await.remove(&id);
-            return Ok(response);
-        }
-        println!("call 3");
-        Err(JsonError::ErrNoResponseGenerated)
-    }
-
-    fn response(&self, response: Response<R, E>) -> Result<()> {
-        let msg = AnyMessage::Response(response);
-
-        if let Err(_) = self.any_message_sender.send(msg) {
-            return Err(JsonError::ErrChannelSendError);
-        }
-        Ok(())
-    }
+    async fn handle(&self, conn: Arc<JsonRpc2<S, R, E>>, request: Request<S>);
 }
 
 pub struct Conn<S, R, E> {
     stream: Box<dyn TObjectStream<String> + Send + Sync>,
     //handler is used for receiving the Request message
     //and implementing the customized logic
-    handler: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+    // handler: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
     closed: AtomicBool,
     any_message_sender: AnyMessageSender<S, R, E>,
 }
@@ -143,7 +55,7 @@ where
 
     fn new(
         stream: Box<dyn TObjectStream<String> + Send + Sync>,
-        h: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+        //h: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
         any_message_sender: AnyMessageSender<S, R, E>,
     ) -> Self
     where
@@ -153,7 +65,7 @@ where
     {
         Self {
             stream: stream,
-            handler: h,
+            //handler: h,
             closed: AtomicBool::new(false),
             any_message_sender,
         }
@@ -172,7 +84,8 @@ where
     }
     pub async fn run_loop(
         &mut self,
-        mut any_msg_receiver: AnyMessageReceiver<S, R, E>,
+        mut receiver_from_jsonrpc2: AnyMessageReceiver<S, R, E>,
+        mut sender_to_jsonrpc2: AnyMessageSender<S, R, E>,
         response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
     ) {
         loop {
@@ -182,28 +95,30 @@ where
                         Ok(data) =>{
                             if let Ok(any_message) = serde_json::from_str::<AnyMessage<S, R, E>>(&data)
                             {
-                                match any_message {
-                                    AnyMessage::Request(req) => {
-                                        if let Some(handler) = self.handler.take() {
-                                            handler.handle(self, req).await;
-                                        }
-                                    }
-                                    AnyMessage::Response(res) => {
-                                        match response_notifiers.lock().await.get_mut(&res.id) {
-                                            Some(sender) => {
-                                                if let Err(err) = sender.send(res) {
-                                                    log::error!("send response err: {}", err);
-                                                }
-                                            }
-                                            None => {
-                                                log::error!(
-                                                    "the responsd sender with id: {} is none",
-                                                    serde_json::to_string(&res.id).unwrap()
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                // match any_message {
+                                //     AnyMessage::Request(req) => {
+                                //         if let Some(handler) = self.handler.take() {
+                                //             handler.handle(self, req).await;
+                                //         }
+                                //     }
+                                //     AnyMessage::Response(res) => {
+                                //         match response_notifiers.lock().await.get_mut(&res.id) {
+                                //             Some(sender) => {
+                                //                 if let Err(err) = sender.send(res) {
+                                //                     log::error!("send response err: {}", err);
+                                //                 }
+                                //             }
+                                //             None => {
+                                //                 log::error!(
+                                //                     "the responsd sender with id: {} is none",
+                                //                     serde_json::to_string(&res.id).unwrap()
+                                //                 );
+                                //             }
+                                //         }
+                                //     }
+                                // }
+
+                                sender_to_jsonrpc2.send(any_message);
                             }
                         }
                         Err(err) =>{
@@ -211,7 +126,7 @@ where
                         }
                     }
                 }
-                any_message = any_msg_receiver.recv() =>{
+                any_message = receiver_from_jsonrpc2.recv() =>{
                     println!("get message=======0");
                     if let Some(any_message_data) = any_message{
                         println!("get message=======1");
@@ -242,6 +157,200 @@ where
         let msg = AnyMessage::Response(response);
 
         if let Err(_) = self.any_message_sender.send(msg) {
+            return Err(JsonError::ErrChannelSendError);
+        }
+        Ok(())
+    }
+}
+
+pub struct JsonRpc2<S, R, E> {
+    seq: AtomicU64,
+    response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
+    //handler: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+    any_msg_sender_to_conn: AnyMessageSender<S, R, E>,
+    //any_msg_receiver_from_conn: AnyMessageReceiver<S, R, E>,
+}
+
+async fn json_rpc2_run_loop<S, R, E>(
+    mut any_msg_receiver_from_conn: AnyMessageReceiver<S, R, E>,
+    mut handler: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+    response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
+    conn: Arc<JsonRpc2<S, R, E>>,
+) where
+    S: Serialize + DeserializeOwned + Sync + Send,
+    R: Serialize + DeserializeOwned + Sync + Send,
+    E: Serialize + DeserializeOwned + Sync + Send,
+{
+    loop {
+        let json_rpc2 = conn.clone();
+        tokio::select! {
+            any_message = any_msg_receiver_from_conn.recv() => {
+                if let Some(any_message_data) = any_message {
+                    match any_message_data {
+                        AnyMessage::Request(req) => {
+                            if let Some(handler) = handler.take() {
+                                 handler.handle(json_rpc2, req).await;
+                                    }
+                                }
+                                AnyMessage::Response(res) => {
+                                    match response_notifiers.lock().await.get_mut(&res.id) {
+                                        Some(sender) => {
+                                            if let Err(err) = sender.send(res) {
+                                                log::error!("send response err: {}", err);
+                                            }
+                                        }
+                                        None => {
+                                            log::error!(
+                                                "the responsd sender with id: {} is none",
+                                                serde_json::to_string(&res.id).unwrap()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                }
+            }
+
+        }
+    }
+}
+
+impl<S, R, E> JsonRpc2<S, R, E>
+where
+    S: Serialize + DeserializeOwned,
+    R: Serialize + DeserializeOwned,
+    E: Serialize + DeserializeOwned,
+{
+    async fn new(
+        stream: Box<dyn TObjectStream<String> + Send + Sync>,
+        h: Option<Box<dyn THandler<S, R, E> + Send + Sync>>,
+    ) -> Arc<Self>
+    where
+        S: Send + Sync + 'static,
+        R: Send + Sync + 'static,
+        E: Send + Sync + 'static,
+    {
+        let (sender_to_conn, receiver_from_jsonrpc2) = mpsc::unbounded_channel();
+        let (sender_to_jsonrpc2, receiver_from_conn) = mpsc::unbounded_channel();
+
+        let mut conn = Conn::new(stream, sender_to_conn.clone());
+
+        let response_notifiers = Arc::new(Mutex::new(HashMap::new()));
+        let response_notifiers_clone = response_notifiers.clone();
+        let response_notifiers_clone_2 = response_notifiers.clone();
+
+        tokio::spawn(async move {
+            conn.run_loop(
+                receiver_from_jsonrpc2,
+                sender_to_jsonrpc2,
+                response_notifiers,
+            )
+            .await;
+        });
+
+        let json_rpc2 = Arc::new(JsonRpc2 {
+            seq: AtomicU64::new(0),
+            response_notifiers: response_notifiers_clone,
+            //handler: h,
+            any_msg_sender_to_conn: sender_to_conn,
+            //any_msg_receiver_from_conn: receiver_from_conn,
+        });
+
+        let json_rpc2_clone = json_rpc2.clone();
+
+        tokio::spawn(async move {
+            json_rpc2_run_loop(
+                receiver_from_conn,
+                h,
+                response_notifiers_clone_2,
+                json_rpc2_clone,
+            )
+            .await;
+        });
+
+        json_rpc2
+    }
+
+    // async fn run_loop(&mut self) {
+    //     loop {
+    //         tokio::select! {
+    //             any_message = self.any_msg_receiver_from_conn.recv() => {
+    //                 if let Some(any_message_data) = any_message {
+    //                     match any_message_data {
+    //                         AnyMessage::Request(req) => {
+    //                             if let Some(handler) = self.handler.take() {
+    //                                  handler.handle(self, req).await;
+    //                                     }
+    //                                 }
+    //                                 AnyMessage::Response(res) => {
+    //                                     match self.response_notifiers.lock().await.get_mut(&res.id) {
+    //                                         Some(sender) => {
+    //                                             if let Err(err) = sender.send(res) {
+    //                                                 log::error!("send response err: {}", err);
+    //                                             }
+    //                                         }
+    //                                         None => {
+    //                                             log::error!(
+    //                                                 "the responsd sender with id: {} is none",
+    //                                                 serde_json::to_string(&res.id).unwrap()
+    //                                             );
+    //                                         }
+    //                                     }
+    //                                 }
+    //                             }
+
+    //                 }
+    //             }
+
+    //         }
+    //     }
+    // }
+}
+
+#[async_trait]
+impl<S, R, E> TJsonRpc2<S, R, E> for JsonRpc2<S, R, E>
+where
+    S: Serialize + DeserializeOwned + Sync + Send,
+    R: Serialize + DeserializeOwned + Sync + Send,
+    E: Serialize + DeserializeOwned + Sync + Send,
+{
+    fn notify(&self, method: String, params: Option<S>) -> Result<()> {
+        let msg = AnyMessage::Request(Request::new(method, params, None));
+        if let Err(_) = self.any_msg_sender_to_conn.send(msg) {
+            return Err(JsonError::ErrChannelSendError);
+        }
+        Ok(())
+    }
+
+    async fn call(&self, method: &str, params: Option<S>) -> Result<Response<R, E>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        println!("call 0");
+        let id_num = self.seq.fetch_add(1, Ordering::Relaxed);
+        let id = Id::Number(id_num);
+        self.response_notifiers
+            .lock()
+            .await
+            .insert(id.clone(), sender);
+        println!("call 1");
+        let msg = AnyMessage::Request(Request::new(String::from(method), params, Some(id.clone())));
+        if let Err(_) = self.any_msg_sender_to_conn.send(msg) {
+            return Err(JsonError::ErrChannelSendError);
+        }
+        println!("call 2");
+        //wait for the response
+        if let Some(response) = receiver.recv().await {
+            self.response_notifiers.lock().await.remove(&id);
+            return Ok(response);
+        }
+        println!("call 3");
+        Err(JsonError::ErrNoResponseGenerated)
+    }
+
+    fn response(&self, response: Response<R, E>) -> Result<()> {
+        let msg = AnyMessage::Response(response);
+
+        if let Err(_) = self.any_msg_sender_to_conn.send(msg) {
             return Err(JsonError::ErrChannelSendError);
         }
         Ok(())
@@ -315,7 +424,11 @@ mod tests {
 
     #[async_trait]
     impl THandler<Vec<u32>, u32, String> for Add {
-        async fn handle(&self, conn: &mut Conn<Vec<u32>, u32, String>, request: Request<Vec<u32>>) {
+        async fn handle(
+            &self,
+            conn: Arc<JsonRpc2<Vec<u32>, u32, String>>,
+            request: Request<Vec<u32>>,
+        ) {
             match request.method.as_str() {
                 "add" => {
                     let params = request.params.unwrap();
@@ -340,7 +453,7 @@ mod tests {
                 .await
                 .expect("cannot generate object stream");
 
-            JsonRpc2::new(Box::new(server_stream), Some(Box::new(Add {}))).await;
+            let mut server = JsonRpc2::new(Box::new(server_stream), Some(Box::new(Add {}))).await;
         }
         println!("init server finished");
     }
