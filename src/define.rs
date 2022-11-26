@@ -88,4 +88,6 @@ pub enum Id {
 pub enum AnyMessage<S, R, E> {
     Request(Request<S>),
     Response(Response<R, E>),
+    #[serde(skip_serializing)]
+    Close(bool),
 }
