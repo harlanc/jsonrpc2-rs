@@ -354,7 +354,7 @@ mod tests {
     impl THandler<Vec<u32>, u32, String> for Add {
         async fn handle(
             &self,
-            conn: Arc<JsonRpc2<Vec<u32>, u32, String>>,
+            json_rpc2: Arc<JsonRpc2<Vec<u32>, u32, String>>,
             request: Request<Vec<u32>>,
         ) {
             match request.method.as_str() {
@@ -362,7 +362,7 @@ mod tests {
                     let params = request.params.unwrap();
                     let add_res: u32 = params.iter().sum();
                     let response = Response::new(request.id.unwrap(), Some(add_res), None);
-                    conn.response(response).unwrap();
+                    json_rpc2.response(response).unwrap();
                 }
 
                 _ => {
