@@ -1,12 +1,9 @@
-use thiserror::Error as ThisError;
-pub type Result<T> = std::result::Result<T, JsonError>;
-use serde_json::Error as SerdeJsonError;
-use tungstenite::error::Error as WsError;
+use {
+    serde_json::Error as SerdeJsonError, thiserror::Error as ThisError,
+    tungstenite::error::Error as WsError,
+};
 
-// #[derive(Debug)]
-// pub struct JsonError {
-//     pub value: JsonErrorValue,
-// }
+pub type Result<T> = std::result::Result<T, JsonError>;
 
 #[derive(ThisError, Debug)]
 pub enum JsonError {
@@ -46,17 +43,6 @@ pub enum JsonError {
     #[error("No response generated after the call function")]
     ErrNoResponseGenerated,
 }
-// impl Error {
-//     pub fn equal(&self, err: &anyhow::Error) -> bool {
-//         err.downcast_ref::<Self>().map_or(false, |e| e == self)
-//     }
-// }
-
-// impl JsonError {
-//     pub fn equal(&self, err: &anyhow::Error) -> bool {
-//         err.downcast_ref::<Self>().map_or(false, |e| e == self)
-//     }
-// }
 
 impl From<WsError> for JsonError {
     fn from(error: WsError) -> Self {

@@ -1,15 +1,15 @@
-use super::error::JsonError;
-
-use super::stream::TObjectStream;
-use async_trait::async_trait;
-use futures_util::{SinkExt, StreamExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::MaybeTlsStream;
-use tokio_tungstenite::WebSocketStream;
-use tungstenite::protocol::Message;
-
-use super::error::Result;
-use url::Url;
+use {
+    super::{
+        error::{JsonError, Result},
+        stream::TObjectStream,
+    },
+    async_trait::async_trait,
+    futures_util::{SinkExt, StreamExt},
+    tokio::net::TcpStream,
+    tokio_tungstenite::{MaybeTlsStream, WebSocketStream},
+    tungstenite::protocol::Message,
+    url::Url,
+};
 
 pub struct ServerObjectStream {
     conn: WebSocketStream<TcpStream>,
@@ -17,20 +17,10 @@ pub struct ServerObjectStream {
 
 impl ServerObjectStream {
     pub async fn accept(stream: TcpStream) -> Result<Self> {
-        println!("ServerObjectStream ====0");
         let ws_stream = tokio_tungstenite::accept_async(stream).await?;
-        println!("ServerObjectStream ====1");
         let obj_stream = Self { conn: ws_stream };
         Ok(obj_stream)
     }
-
-    // pub async fn connect(url: Url) -> Result<Self> {
-    //     println!("ObjectStream ====0");
-    //     let ws_stream = tokio_tungstenite::connect_async(url).await?;
-    //     println!("ObjectStream ====1");
-    //     let obj_stream = Self { conn: ws_stream };
-    //     Ok(obj_stream)
-    // }
 }
 
 #[async_trait]
@@ -67,9 +57,7 @@ pub struct ClientObjectStream {
 
 impl ClientObjectStream {
     pub async fn connect(url: Url) -> Result<Self> {
-        println!("ClientObjectStream ====0");
         let (ws_stream, _) = tokio_tungstenite::connect_async(url).await?;
-        println!("ClientObjectStream ====1");
         let obj_stream = Self { conn: ws_stream };
         Ok(obj_stream)
     }

@@ -1,6 +1,4 @@
-use super::error::Result;
-use async_trait::async_trait;
-
+use {super::error::Result, async_trait::async_trait};
 #[async_trait]
 pub trait TObjectStream<T> {
     async fn write_object(&mut self, obj: T) -> Result<()>;
