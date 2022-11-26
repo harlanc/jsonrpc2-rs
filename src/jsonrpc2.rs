@@ -176,13 +176,10 @@ where
         response_notifiers: Arc<Mutex<HashMap<Id, ResponseNotifier<R, E>>>>,
     ) {
         loop {
-            let mut msg_data: Option<String> = None;
             tokio::select! {
                 msg = self.stream.read_object() => {
                     match msg{
                         Ok(data) =>{
-                            //msg_data = Some(data);
-
                             if let Ok(any_message) = serde_json::from_str::<AnyMessage<S, R, E>>(&data)
                             {
                                 match any_message {
@@ -224,35 +221,6 @@ where
                 }
             }
 
-            // if msg_data.is_none() {
-            //     continue;
-            // }
-
-            // if let Ok(any_message) = serde_json::from_str::<AnyMessage<S, R, E>>(&msg_data.unwrap())
-            // {
-            //     match any_message {
-            //         AnyMessage::Request(req) => {
-            //             if let Some(handler) = self.handler.take() {
-            //                 handler.handle(self, req).await;
-            //             }
-            //         }
-            //         AnyMessage::Response(res) => {
-            //             match response_notifiers.lock().await.get_mut(&res.id) {
-            //                 Some(sender) => {
-            //                     if let Err(err) = sender.send(res) {
-            //                         log::error!("send response err: {}", err);
-            //                     }
-            //                 }
-            //                 None => {
-            //                     log::error!(
-            //                         "the responsd sender with id: {} is none",
-            //                         serde_json::to_string(&res.id).unwrap()
-            //                     );
-            //                 }
-            //             }
-            //         }
-            //     }
-            // }
             // _ = interval.tick() => {
             //     ws_sender.send(Message::Text("tick".to_owned())).await?;
             // }
