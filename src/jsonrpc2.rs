@@ -348,14 +348,18 @@ mod tests {
         assert_eq!(response_any, data_response);
     }
 
+    type ResponseResult = u32;
+    type ErrorData = String;
+    type RequestParams = Vec<u32>;
+
     struct Add {}
 
     #[async_trait]
-    impl THandler<Vec<u32>, u32, String> for Add {
+    impl THandler<RequestParams, ResponseResult, ErrorData> for Add {
         async fn handle(
             &self,
-            json_rpc2: Arc<JsonRpc2<Vec<u32>, u32, String>>,
-            request: Request<Vec<u32>>,
+            json_rpc2: Arc<JsonRpc2<RequestParams, ResponseResult, ErrorData>>,
+            request: Request<RequestParams>,
         ) {
             match request.method.as_str() {
                 "add" => {
@@ -399,16 +403,15 @@ mod tests {
             .await
             .expect("cannot generate object stream");
 
-        let conn_arc = JsonRpc2::<_, u32, String>::new(Box::new(client_stream), None).await;
+        let conn_arc =
+            JsonRpc2::<_, ResponseResult, ErrorData>::new(Box::new(client_stream), None).await;
 
         time::sleep(time::Duration::new(2, 0)).await;
-        println!("adfadfadf");
         match conn_arc.call("add", Some(vec![2u32, 3u32, 4u32])).await {
             Ok(response) => {
                 let result = response.result.unwrap();
-                print!("result: {}", result);
+
                 assert_eq!(result, 9);
-                println!("adfadfadf===");
             }
             Err(err) => {
                 log::error!("call add error: {}", err);
