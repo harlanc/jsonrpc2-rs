@@ -36,7 +36,7 @@ pub trait THandler<S, R, E>
 where
     S: Serialize,
 {
-    async fn handle(&self, conn: Arc<JsonRpc2<S, R, E>>, request: Request<S>);
+    async fn handle(&mut self, conn: Arc<JsonRpc2<S, R, E>>, request: Request<S>);
 }
 
 pub struct Conn {
@@ -150,7 +150,7 @@ async fn json_rpc2_run_loop<S, R, E>(
                 if let Some(any_message_data) = any_message {
                     match any_message_data {
                         AnyMessage::Request(req) => {
-                            if let Some(handler) = handler.take() {
+                            if let Some(mut handler) =  handler.take() {
                                 handler.handle(json_rpc2, req).await;
                             }
                         }
@@ -293,6 +293,7 @@ mod tests {
     use crate::stream_ws::ClientObjectStream;
     use crate::stream_ws::ServerObjectStream;
     use async_trait::async_trait;
+    use serde::{Deserialize, Serialize};
     use std::str::FromStr;
     use std::sync::Arc;
     use tokio::net::TcpListener;
@@ -315,10 +316,18 @@ mod tests {
         assert_eq!(request, req2);
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(untagged)]
+    pub enum Parameter {
+        Receiver(Vec<u32>),
+        Sender(String),
+    }
+
     #[test]
     fn test_any_message_request() {
         let method = String::from_str("add").unwrap();
-        let params = vec![1_u32, 2_u32];
+        let params = Parameter::Receiver(vec![1_u32, 2_u32]);
+        println!("parameter:{}", serde_json::to_string(&params).unwrap());
         let id = Id::Number(3);
 
         let request = Request::new(method, Some(params), Some(id));
@@ -327,7 +336,7 @@ mod tests {
         let marshal_msg = serde_json::to_string(&request_any).unwrap();
         println!("marshal AnyMessage request: {}", marshal_msg);
 
-        let data: AnyMessage<Vec<u32>, String, String> =
+        let data: AnyMessage<Parameter, String, String> =
             serde_json::from_str(&marshal_msg).unwrap();
 
         assert_eq!(request_any, data);
@@ -357,7 +366,7 @@ mod tests {
     #[async_trait]
     impl THandler<RequestParams, ResponseResult, ErrorData> for Add {
         async fn handle(
-            &self,
+            &mut self,
             json_rpc2: Arc<JsonRpc2<RequestParams, ResponseResult, ErrorData>>,
             request: Request<RequestParams>,
         ) {
