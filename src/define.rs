@@ -66,12 +66,21 @@ pub struct Error<E> {
     #[serde(rename = "code")]
     code: i64,
     #[serde(rename = "message")]
-    messge: String,
+    message: String,
     //A Primitive or Structured value that contains additional information about the error.
     //This may be omitted.
     //The value of this member is defined by the Server
     #[serde(rename = "data", skip_serializing_if = "Option::is_none")]
     data: Option<E>,
+}
+impl<E> Error<E> {
+    pub fn new(code: i64, message: String, data: Option<E>) -> Self {
+        Self {
+            code,
+            message,
+            data,
+        }
+    }
 }
 //https://www.jsonrpc.org/specification#request_object
 //An identifier established by the Client that MUST contain a String, Number, or NULL value if included.
