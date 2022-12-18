@@ -47,7 +47,7 @@ pub struct Conn {
 impl Conn {
     fn new(stream: Box<dyn TObjectStream<String> + Send + Sync>) -> Self {
         Self {
-            stream: stream,
+            stream,
             closed: AtomicBool::new(false),
         }
     }
@@ -79,15 +79,21 @@ impl Conn {
             tokio::select! {
                 msg = self.stream.read_object() => {
                     match msg{
-                        Ok(data) =>{
-                            if let Ok(any_message) = serde_json::from_str::<AnyMessage<S, R, E>>(&data)
+                        Ok(data) => {
+                            match serde_json::from_str::<AnyMessage<S, R, E>>(&data)
                             {
-                                if let Err(err) = sender_to_jsonrpc2.send(any_message) {
-                                    log::error!("run_loop send to jsonrpc2 err {}",err);
+                                Ok(any_message) => {
+                                    if let Err(err) = sender_to_jsonrpc2.send(any_message) {
+                                        log::error!("run_loop send to jsonrpc2 err {}",err);
+                                    }
+                                }
+                                Err(err) => {
+                                    log::error!("run_loop deserialize data:{} with err: {}",data, err);
                                 }
                             }
+
                         }
-                        Err(err) =>{
+                        Err(err) => {
                             log::error!("run_loop read object err {}",err);
                             continue;
                         }
@@ -150,12 +156,13 @@ async fn json_rpc2_run_loop<S, R, E>(
                 if let Some(any_message_data) = any_message {
                     match any_message_data {
                         AnyMessage::Request(req) => {
-                            if let Some(mut handler) =  handler.take() {
-                                handler.handle(json_rpc2, req).await;
+                            if let Some(mut handler_val) =  handler.take(){
+                                handler_val.handle(json_rpc2, req).await;
+                                handler = Some(handler_val);
                             }
                         }
                         AnyMessage::Response(res) => {
-                             match response_notifiers.lock().await.get_mut(&res.id) {
+                            match response_notifiers.lock().await.get_mut(&res.id) {
                                 Some(sender) => {
                                     if let Err(err) = sender.send(res) {
                                         log::error!("send response err: {}", err);
@@ -210,7 +217,7 @@ where
 
         let json_rpc2 = Arc::new(JsonRpc2 {
             seq: AtomicU64::new(0),
-            response_notifiers: response_notifiers,
+            response_notifiers,
             any_msg_sender_to_conn: sender_to_conn,
         });
 

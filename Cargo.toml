@@ -1,7 +1,7 @@
 [package]
 name = "jrpc2"
 description = "json rpc library."
-version = "0.2.2"
+version = "0.2.3"
 authors = ["HarlanC <wawacry@qq.com"]
 repository = "https://github.com/harlanc/jsonrpc2-rs"
 license = "MIT"

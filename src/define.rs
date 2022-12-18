@@ -11,7 +11,7 @@ pub(super) type AnyMessageReceiver<S, R, E> = mpsc::UnboundedReceiver<AnyMessage
 //https://www.jsonrpc.org/specification#request_object
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Request<S> {
-    #[serde(rename = "jsonrpc2")]
+    #[serde(rename = "jsonrpc2", default)]
     jsonrpc2: String,
     #[serde(rename = "method")]
     pub method: String,
