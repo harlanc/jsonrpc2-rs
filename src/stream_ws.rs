@@ -29,6 +29,7 @@ impl TObjectStream<String> for ServerObjectStream {
         match self.conn.next().await {
             Some(msg) => {
                 let m = msg?;
+                log::trace!("receive msg:{}", m);
                 if !m.is_text() {
                     return Err(JsonError::ErrWebsocketTypeNotCorrect);
                 }

@@ -39,6 +39,12 @@ where
     async fn handle(&mut self, conn: Arc<JsonRpc2<S, R, E>>, request: Request<S>);
 }
 
+// struct DefaultHandler {}
+// #[async_trait]
+// impl THandler<u8, u8, u8> for DefaultHandler {
+//     async fn handle(&mut self, conn: Arc<JsonRpc2<u8, u8, u8>>, request: Request<u8>) {}
+// }
+
 pub struct Conn {
     stream: Box<dyn TObjectStream<String> + Send + Sync>,
     closed: AtomicBool,
@@ -79,21 +85,20 @@ impl Conn {
             tokio::select! {
                 msg = self.stream.read_object() => {
                     match msg{
-                        Ok(data) => {
-                            match serde_json::from_str::<AnyMessage<S, R, E>>(&data)
+                        Ok(data) =>{
+                            match  serde_json::from_str::<AnyMessage<S, R, E>>(&data)
                             {
-                                Ok(any_message) => {
+                                Ok(any_message) =>{
                                     if let Err(err) = sender_to_jsonrpc2.send(any_message) {
                                         log::error!("run_loop send to jsonrpc2 err {}",err);
                                     }
-                                }
-                                Err(err) => {
+                            }
+                                Err(err) =>{
                                     log::error!("run_loop deserialize data:{} with err: {}",data, err);
                                 }
                             }
-
                         }
-                        Err(err) => {
+                        Err(err) =>{
                             log::error!("run_loop read object err {}",err);
                             continue;
                         }
@@ -153,12 +158,13 @@ async fn json_rpc2_run_loop<S, R, E>(
         let json_rpc2 = json_rpc2.clone();
         tokio::select! {
             any_message = any_msg_receiver_from_conn.recv() => {
+
                 if let Some(any_message_data) = any_message {
                     match any_message_data {
                         AnyMessage::Request(req) => {
-                            if let Some(mut handler_val) =  handler.take(){
-                                handler_val.handle(json_rpc2, req).await;
-                                handler = Some(handler_val);
+                            if let Some(mut handler_take) =  handler.take(){
+                                handler_take.handle(json_rpc2, req).await;
+                                handler = Some(handler_take);
                             }
                         }
                         AnyMessage::Response(res) => {
@@ -174,6 +180,7 @@ async fn json_rpc2_run_loop<S, R, E>(
                             }
                         }
                         AnyMessage::Close(closed) => {
+                            log::info!("close");
                             if closed {
                                 log::info!("client side is closed");
                                 break;
@@ -183,7 +190,6 @@ async fn json_rpc2_run_loop<S, R, E>(
 
                 }
             }
-
         }
     }
 }
